@@ -42,11 +42,23 @@ jobs:
           echo "raw=${RAW_VERSION}" >> "$GITHUB_OUTPUT"
           echo "tag=v${RAW_VERSION}" >> "$GITHUB_OUTPUT"
 
-      - name: Verify upstream gost tag exists
+      - name: Fetch upstream release metadata
+        id: upstream
         env:
           GH_TOKEN: ${{ github.token }}
+        shell: bash
         run: |
-          gh release view "${{ steps.version.outputs.tag }}" --repo go-gost/gost >/dev/null
+          set -euo pipefail
+          TAG="${{ steps.version.outputs.tag }}"
+          ASSET_URL=$(gh api repos/go-gost/gost/releases/tags/${TAG} \
+            --jq '.assets[] | select((.name | test("linux"; "i")) and (.name | test("arm64|aarch64"; "i")) and (.name | test("tar\\.gz$|tgz$|zip$"; "i"))) | .browser_download_url' | head -n1)
+          ASSET_NAME=$(basename "$ASSET_URL")
+          if [[ -z "$ASSET_URL" ]]; then
+            echo "No suitable arm64 linux release asset found for ${TAG}" >&2
+            exit 1
+          fi
+          echo "asset_url=$ASSET_URL" >> "$GITHUB_OUTPUT"
+          echo "asset_name=$ASSET_NAME" >> "$GITHUB_OUTPUT"
 
       - name: Patch package version
         shell: bash
@@ -59,7 +71,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential clang flex bison g++ gawk \
             gcc-multilib g++-multilib gettext git libncurses5-dev libssl-dev \
-            python3-distutils rsync swig unzip zlib1g-dev file wget curl ca-certificates
+            python3-distutils rsync swig unzip zlib1g-dev file wget curl ca-certificates xz-utils jq
 
       - name: Download OpenWrt SDK
         shell: bash
@@ -71,18 +83,43 @@ jobs:
           tar -xf sdk.tar.xz
           mv "$SDK_NAME" sdk
 
+      - name: Download upstream gost binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dl-extract package-src
+          wget -O "dl-extract/${{ steps.upstream.outputs.asset_name }}" "${{ steps.upstream.outputs.asset_url }}"
+          case "${{ steps.upstream.outputs.asset_name }}" in
+            *.tar.gz|*.tgz) tar -xzf "dl-extract/${{ steps.upstream.outputs.asset_name }}" -C dl-extract ;;
+            *.zip) unzip -q "dl-extract/${{ steps.upstream.outputs.asset_name }}" -d dl-extract ;;
+            *) echo "Unsupported archive format" >&2; exit 1 ;;
+          esac
+          BIN=$(find dl-extract -type f \( -name gost -o -name 'gost-linux-arm64' -o -name 'gost_*linux*arm64*' \) | head -n1)
+          if [[ -z "$BIN" ]]; then
+            echo "Could not locate gost binary in upstream asset" >&2
+            find dl-extract -maxdepth 3 -type f | sort >&2
+            exit 1
+          fi
+          install -m 0755 "$BIN" package-src/gost
+          file package-src/gost
+
       - name: Prepare package feed overlay
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p sdk/package/gost-openwrt
-          rsync -a --delete ./ sdk/package/gost-openwrt/ --exclude sdk --exclude .git
+          rsync -a --delete ./ sdk/package/gost-openwrt/ \
+            --exclude sdk --exclude .git --exclude dl-extract
+          mkdir -p sdk/package/gost-openwrt/build-bin
+          install -m 0755 package-src/gost sdk/package/gost-openwrt/build-bin/gost
 
-      - name: Update feeds
+      - name: Inject binary into package build dir
+        shell: bash
         working-directory: sdk
         run: |
-          ./scripts/feeds update -a
-          ./scripts/feeds install -a
+          set -euo pipefail
+          mkdir -p build_dir/target-aarch64_generic_musl/gost-0.0.0
+          install -m 0755 ../package-src/gost build_dir/target-aarch64_generic_musl/gost-0.0.0/gost || true
 
       - name: Prepare build config
         working-directory: sdk
@@ -95,6 +132,13 @@ jobs:
           CONFIG_PACKAGE_gost=y
 CONFIG
           make defconfig
+
+      - name: Stage binary for package install
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p sdk/build_dir/target-aarch64_generic_musl/gost-${{ steps.version.outputs.raw }}
+          install -m 0755 package-src/gost sdk/build_dir/target-aarch64_generic_musl/gost-${{ steps.version.outputs.raw }}/gost
 
       - name: Build package
         working-directory: sdk
