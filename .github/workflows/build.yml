@@ -1,0 +1,167 @@
+name: build-openwrt-ipk
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      gost_version:
+        description: 'gost version to build (defaults to tag without leading v)'
+        required: false
+        type: string
+
+jobs:
+  build-arm64-openwrt-2203:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      OPENWRT_VERSION: '22.03.7'
+      OPENWRT_TARGET: 'armsr'
+      OPENWRT_SUBTARGET: 'armv8'
+      PACKAGE_NAME: 'gost'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve gost version from tag/input
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_TYPE:-}" == "tag" ]]; then
+            RAW_VERSION="${GITHUB_REF_NAME#v}"
+          elif [[ -n "${{ inputs.gost_version || '' }}" ]]; then
+            RAW_VERSION="${{ inputs.gost_version }}"
+            RAW_VERSION="${RAW_VERSION#v}"
+          else
+            echo "No tag or workflow_dispatch input provided" >&2
+            exit 1
+          fi
+          echo "raw=${RAW_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${RAW_VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch upstream release metadata
+        id: upstream
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.version.outputs.tag }}"
+          ASSET_URL=$(gh api repos/go-gost/gost/releases/tags/${TAG} \
+            --jq '.assets[] | select((.name | test("linux"; "i")) and (.name | test("arm64|aarch64"; "i")) and (.name | test("tar\\.gz$|tgz$|zip$"; "i"))) | .browser_download_url' | head -n1)
+          ASSET_NAME=$(basename "$ASSET_URL")
+          if [[ -z "$ASSET_URL" ]]; then
+            echo "No suitable arm64 linux release asset found for ${TAG}" >&2
+            exit 1
+          fi
+          echo "asset_url=$ASSET_URL" >> "$GITHUB_OUTPUT"
+          echo "asset_name=$ASSET_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Patch package version
+        shell: bash
+        run: |
+          set -euo pipefail
+          sed -i "s/^PKG_VERSION:=.*/PKG_VERSION:=${{ steps.version.outputs.raw }}/" Makefile
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang flex bison g++ gawk \
+            gcc-multilib g++-multilib gettext git libncurses5-dev libssl-dev \
+            python3-distutils rsync swig unzip zlib1g-dev file wget curl ca-certificates xz-utils jq
+
+      - name: Download OpenWrt SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK_NAME="openwrt-sdk-${OPENWRT_VERSION}-${OPENWRT_TARGET}-${OPENWRT_SUBTARGET}_gcc-11.2.0_musl.Linux-x86_64"
+          SDK_URL="https://downloads.openwrt.org/releases/${OPENWRT_VERSION}/targets/${OPENWRT_TARGET}/${OPENWRT_SUBTARGET}/${SDK_NAME}.tar.xz"
+          wget -O sdk.tar.xz "$SDK_URL"
+          tar -xf sdk.tar.xz
+          mv "$SDK_NAME" sdk
+
+      - name: Download upstream gost binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dl-extract package-src
+          wget -O "dl-extract/${{ steps.upstream.outputs.asset_name }}" "${{ steps.upstream.outputs.asset_url }}"
+          case "${{ steps.upstream.outputs.asset_name }}" in
+            *.tar.gz|*.tgz) tar -xzf "dl-extract/${{ steps.upstream.outputs.asset_name }}" -C dl-extract ;;
+            *.zip) unzip -q "dl-extract/${{ steps.upstream.outputs.asset_name }}" -d dl-extract ;;
+            *) echo "Unsupported archive format" >&2; exit 1 ;;
+          esac
+          BIN=$(find dl-extract -type f \( -name gost -o -name 'gost-linux-arm64' -o -name 'gost_*linux*arm64*' \) | head -n1)
+          if [[ -z "$BIN" ]]; then
+            echo "Could not locate gost binary in upstream asset" >&2
+            find dl-extract -maxdepth 3 -type f | sort >&2
+            exit 1
+          fi
+          install -m 0755 "$BIN" package-src/gost
+          file package-src/gost
+
+      - name: Prepare package feed overlay
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p sdk/package/gost-openwrt
+          rsync -a --delete ./ sdk/package/gost-openwrt/ \
+            --exclude sdk --exclude .git --exclude dl-extract
+          mkdir -p sdk/package/gost-openwrt/build-bin
+          install -m 0755 package-src/gost sdk/package/gost-openwrt/build-bin/gost
+
+      - name: Inject binary into package build dir
+        shell: bash
+        working-directory: sdk
+        run: |
+          set -euo pipefail
+          mkdir -p build_dir/target-aarch64_generic_musl/gost-0.0.0
+          install -m 0755 ../package-src/gost build_dir/target-aarch64_generic_musl/gost-0.0.0/gost || true
+
+      - name: Prepare build config
+        working-directory: sdk
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat >> .config <<CONFIG
+          CONFIG_TARGET_${OPENWRT_TARGET}=y
+          CONFIG_TARGET_${OPENWRT_TARGET}_${OPENWRT_SUBTARGET}=y
+          CONFIG_PACKAGE_gost=y
+CONFIG
+          make defconfig
+
+      - name: Stage binary for package install
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p sdk/build_dir/target-aarch64_generic_musl/gost-${{ steps.version.outputs.raw }}
+          install -m 0755 package-src/gost sdk/build_dir/target-aarch64_generic_musl/gost-${{ steps.version.outputs.raw }}/gost
+
+      - name: Build package
+        working-directory: sdk
+        run: |
+          make package/gost-openwrt/gost/compile V=s
+
+      - name: Collect artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          find sdk/bin/packages -type f -name '*.ipk' -exec cp -v {} dist/ \;
+          ls -lah dist
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gost-openwrt-ipk-${{ steps.version.outputs.tag }}
+          path: dist/*.ipk
+
+      - name: Publish to GitHub Release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${GITHUB_REF_NAME}" dist/*.ipk --clobber
