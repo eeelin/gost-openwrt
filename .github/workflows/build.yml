@@ -7,8 +7,8 @@ on:
   workflow_dispatch:
     inputs:
       gost_version:
-        description: 'gost version to build (defaults to tag without leading v)'
-        required: false
+        description: 'gost version to build (without leading v preferred)'
+        required: true
         type: string
 
 jobs:
@@ -20,7 +20,6 @@ jobs:
       OPENWRT_VERSION: '22.03.7'
       OPENWRT_TARGET: 'armsr'
       OPENWRT_SUBTARGET: 'armv8'
-      PACKAGE_NAME: 'gost'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -32,11 +31,12 @@ jobs:
           set -euo pipefail
           if [[ "${GITHUB_REF_TYPE:-}" == "tag" ]]; then
             RAW_VERSION="${GITHUB_REF_NAME#v}"
-          elif [[ -n "${{ inputs.gost_version || '' }}" ]]; then
-            RAW_VERSION="${{ inputs.gost_version }}"
-            RAW_VERSION="${RAW_VERSION#v}"
           else
-            echo "No tag or workflow_dispatch input provided" >&2
+            RAW_VERSION="${{ github.event.inputs.gost_version }}"
+            RAW_VERSION="${RAW_VERSION#v}"
+          fi
+          if [[ -z "$RAW_VERSION" ]]; then
+            echo "Resolved empty version" >&2
             exit 1
           fi
           echo "raw=${RAW_VERSION}" >> "$GITHUB_OUTPUT"
@@ -50,28 +50,26 @@ jobs:
         run: |
           set -euo pipefail
           TAG="${{ steps.version.outputs.tag }}"
-          ASSET_URL=$(gh api repos/go-gost/gost/releases/tags/${TAG} \
+          ASSET_URL=$(gh api "repos/go-gost/gost/releases/tags/${TAG}" \
             --jq '.assets[] | select((.name | test("linux"; "i")) and (.name | test("arm64|aarch64"; "i")) and (.name | test("tar\\.gz$|tgz$|zip$"; "i"))) | .browser_download_url' | head -n1)
-          ASSET_NAME=$(basename "$ASSET_URL")
           if [[ -z "$ASSET_URL" ]]; then
-            echo "No suitable arm64 linux release asset found for ${TAG}" >&2
+            echo "No suitable Linux arm64 release asset found for ${TAG}" >&2
             exit 1
           fi
+          ASSET_NAME=$(basename "$ASSET_URL")
           echo "asset_url=$ASSET_URL" >> "$GITHUB_OUTPUT"
           echo "asset_name=$ASSET_NAME" >> "$GITHUB_OUTPUT"
 
       - name: Patch package version
         shell: bash
-        run: |
-          set -euo pipefail
-          sed -i "s/^PKG_VERSION:=.*/PKG_VERSION:=${{ steps.version.outputs.raw }}/" Makefile
+        run: sed -i "s/^PKG_VERSION:=.*/PKG_VERSION:=${{ steps.version.outputs.raw }}/" Makefile
 
       - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential clang flex bison g++ gawk \
             gcc-multilib g++-multilib gettext git libncurses5-dev libssl-dev \
-            python3-distutils rsync swig unzip zlib1g-dev file wget curl ca-certificates xz-utils jq
+            python3-distutils rsync swig unzip zlib1g-dev file wget curl ca-certificates xz-utils
 
       - name: Download OpenWrt SDK
         shell: bash
@@ -103,23 +101,14 @@ jobs:
           install -m 0755 "$BIN" package-src/gost
           file package-src/gost
 
-      - name: Prepare package feed overlay
+      - name: Prepare package source in SDK
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p sdk/package/gost-openwrt
-          rsync -a --delete ./ sdk/package/gost-openwrt/ \
-            --exclude sdk --exclude .git --exclude dl-extract
-          mkdir -p sdk/package/gost-openwrt/build-bin
-          install -m 0755 package-src/gost sdk/package/gost-openwrt/build-bin/gost
-
-      - name: Inject binary into package build dir
-        shell: bash
-        working-directory: sdk
-        run: |
-          set -euo pipefail
-          mkdir -p build_dir/target-aarch64_generic_musl/gost-0.0.0
-          install -m 0755 ../package-src/gost build_dir/target-aarch64_generic_musl/gost-0.0.0/gost || true
+          rsync -a --delete ./ sdk/package/gost-openwrt/ --exclude sdk --exclude .git --exclude dl-extract --exclude package-src
+          mkdir -p sdk/build_dir/target-aarch64_generic_musl/gost-${{ steps.version.outputs.raw }}
+          install -m 0755 package-src/gost sdk/build_dir/target-aarch64_generic_musl/gost-${{ steps.version.outputs.raw }}/gost
 
       - name: Prepare build config
         working-directory: sdk
@@ -133,17 +122,9 @@ jobs:
 CONFIG
           make defconfig
 
-      - name: Stage binary for package install
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p sdk/build_dir/target-aarch64_generic_musl/gost-${{ steps.version.outputs.raw }}
-          install -m 0755 package-src/gost sdk/build_dir/target-aarch64_generic_musl/gost-${{ steps.version.outputs.raw }}/gost
-
       - name: Build package
         working-directory: sdk
-        run: |
-          make package/gost-openwrt/gost/compile V=s
+        run: make package/gost-openwrt/gost/compile V=s
 
       - name: Collect artifacts
         shell: bash
@@ -163,5 +144,4 @@ CONFIG
         if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release upload "${GITHUB_REF_NAME}" dist/*.ipk --clobber
+        run: gh release upload "${GITHUB_REF_NAME}" dist/*.ipk --clobber
