@@ -9,7 +9,6 @@ on:
       gost_version:
         description: 'gost version to build (without leading v preferred)'
         required: true
-        type: string
 
 jobs:
   build-arm64-openwrt-2203:
@@ -29,7 +28,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [[ "${GITHUB_REF_TYPE:-}" == "tag" ]]; then
+          if [[ "${GITHUB_REF:-}" == refs/tags/* ]]; then
             RAW_VERSION="${GITHUB_REF_NAME#v}"
           else
             RAW_VERSION="${{ github.event.inputs.gost_version }}"
@@ -50,8 +49,7 @@ jobs:
         run: |
           set -euo pipefail
           TAG="${{ steps.version.outputs.tag }}"
-          ASSET_URL=$(gh api "repos/go-gost/gost/releases/tags/${TAG}" \
-            --jq '.assets[] | select((.name | test("linux"; "i")) and (.name | test("arm64|aarch64"; "i")) and (.name | test("tar\\.gz$|tgz$|zip$"; "i"))) | .browser_download_url' | head -n1)
+          ASSET_URL=$(gh api "repos/go-gost/gost/releases/tags/${TAG}" --jq '.assets[] | select((.name | test("linux"; "i")) and (.name | test("arm64|aarch64"; "i")) and (.name | test("tar\\.gz$|tgz$|zip$"; "i"))) | .browser_download_url' | head -n1)
           if [[ -z "$ASSET_URL" ]]; then
             echo "No suitable Linux arm64 release asset found for ${TAG}" >&2
             exit 1
@@ -141,7 +139,7 @@ CONFIG
           path: dist/*.ipk
 
       - name: Publish to GitHub Release
-        if: github.ref_type == 'tag'
+        if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "${GITHUB_REF_NAME}" dist/*.ipk --clobber
