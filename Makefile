@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=gost
-PKG_VERSION:=3.0.0
+PKG_VERSION:=0.0.0
 PKG_RELEASE:=1
 
 PKG_SOURCE_PROTO:=git
@@ -23,7 +23,6 @@ GO_PKG_BUILD_PKG:=$(GO_PKG)/cmd/gost
 include $(INCLUDE_DIR)/package.mk
 include ../../lang/golang/golang-package.mk
 
-
 define Package/gost
   SECTION:=net
   CATEGORY:=Network
@@ -32,11 +31,14 @@ define Package/gost
   DEPENDS:=$(GO_ARCH_DEPENDS)
 endef
 
-
 define Package/gost/description
- A flexible tunnel/proxy tool packaged for OpenWrt.
+ A flexible tunnel/proxy tool packaged for OpenWrt 22.03.x.
 endef
 
+define Package/gost/conffiles
+/etc/config/gost
+/etc/gost/config.yaml
+endef
 
 define Package/gost/install
 	$(INSTALL_DIR) $(1)/usr/bin
@@ -45,6 +47,8 @@ define Package/gost/install
 	$(INSTALL_BIN) ./files/etc/init.d/gost $(1)/etc/init.d/gost
 	$(INSTALL_DIR) $(1)/etc/config
 	$(INSTALL_CONF) ./files/etc/config/gost $(1)/etc/config/gost
+	$(INSTALL_DIR) $(1)/etc/gost
+	$(INSTALL_CONF) ./files/etc/gost/config.yaml $(1)/etc/gost/config.yaml
 endef
 
 $(eval $(call GoBinPackage,gost))

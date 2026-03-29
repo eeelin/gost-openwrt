@@ -1,22 +1,25 @@
 # gost-openwrt
 
-OpenWrt package scaffold for building `gost` as an `.ipk` package.
+Build `gost` as an OpenWrt `.ipk` package.
 
-## What is included
+## Target
 
-- OpenWrt package `Makefile`
-- procd init script: `files/etc/init.d/gost`
-- UCI config stub: `files/etc/config/gost`
+- **OpenWrt:** 22.03.x
+- **Architecture:** arm64
+- **Current SDK in CI:** 22.03.7 `armsr/armv8`
 
-## Current status
+## Release model
 
-This is an initial scaffold PR intended to establish package layout and service wiring.
-It is **not yet fully validated** against a specific OpenWrt SDK/image builder release.
+This repository builds on **git tag push**.
 
-## Next steps
+If you push tag `v3.1.0`, the workflow will:
+1. build package version `3.1.0`
+2. fetch the matching upstream release/tag from `go-gost/gost`
+3. build an OpenWrt `.ipk`
+4. upload the resulting package to the GitHub Release for `v3.1.0`
 
-- verify the correct upstream tag/versioning for gost v3
-- confirm the OpenWrt golang packaging macros against target branch
-- add default `/etc/gost/config.yaml` handling strategy
-- test build in OpenWrt SDK and refine dependencies/install paths
-- optionally add firewall/service docs and example configs
+## Notes
+
+- The package version is derived from this repository tag.
+- The workflow validates that the same version tag exists upstream in `go-gost/gost`.
+- This repo currently targets **OpenWrt 22.03.x arm64 only**.
